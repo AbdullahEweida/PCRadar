@@ -1,0 +1,6 @@
+@PCRadar_HostAddress = http://localhost:5098
+
+GET {{PCRadar_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

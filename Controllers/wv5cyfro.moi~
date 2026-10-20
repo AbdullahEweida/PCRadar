@@ -1,0 +1,130 @@
+﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using PCRadar.Data;
+using PCRadar.Models;
+using PCRadar.DTOs;
+using HtmlAgilityPack;
+
+namespace PCRadar.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class StoresController : ControllerBase
+    {
+        private readonly AppDbContext _context;
+
+        public StoresController(AppDbContext context)
+        {
+            _context = context;
+        }
+
+        // 1. استرجاع كل المتاجر لعرضها في القائمة الجانبية
+        [HttpGet]
+        public async Task>> GetStores()
+        {
+            var stores = await _context.Stores
+                .Select(s => new StoreDto
+                {
+                    Id = s.ID,
+                    Name = s.Name,
+                    BaseUrl = s.BaseUrl,
+                    CardXPath = s.CardXPath,
+                    NameXPath = s.NameXPath,
+                    PriceXPath = s.PriceXPath,
+                    LinkXPath = s.LinkXPath,
+                    AvailabilityXPath = s.AvailabilityXPath,
+                    Status = "active", // ممكن نعملها Logic بعدين
+                    ProductsTracked = _context.ProductStores.Count(ps => ps.StoreID == s.ID),
+                    LastSync = "Just now" // ممكن نجيبها من آخر PriceHistory
+                })
+                .ToListAsync();
+
+            return Ok(stores);
+        }
+
+        // 2. إضافة متجر جديد
+        [HttpPost]
+        public async Task> CreateStore([FromBody] StoreDto dto)
+        {
+            var store = new Store
+            {
+                Name = dto.Name,
+                BaseUrl = dto.BaseUrl,
+                CardXPath = dto.CardXPath,
+                NameXPath = dto.NameXPath,
+                PriceXPath = dto.PriceXPath,
+                LinkXPath = dto.LinkXPath,
+                AvailabilityXPath = dto.AvailabilityXPath
+            };
+
+            _context.Stores.Add(store);
+            await _context.SaveChangesAsync();
+
+            return CreatedAtAction(nameof(GetStores), new { id = store.ID }, store);
+        }
+
+        // 3. تعديل متجر
+        [HttpPut("{id}")]
+        public async Task UpdateStore(int id, [FromBody] StoreDto dto)
+        {
+            var store = await _context.Stores.FindAsync(id);
+            if (store == null) return NotFound();
+
+            store.Name = dto.Name;
+            store.BaseUrl = dto.BaseUrl;
+            store.CardXPath = dto.CardXPath;
+            store.NameXPath = dto.NameXPath;
+            store.PriceXPath = dto.PriceXPath;
+            store.LinkXPath = dto.LinkXPath;
+            store.AvailabilityXPath = dto.AvailabilityXPath;
+
+            await _context.SaveChangesAsync();
+            return NoContent();
+        }
+
+        // 4. حذف متجر
+        [HttpDelete("{id}")]
+        public async Task< DeleteStore(int id)
+        {
+            var store = await _context.Stores.FindAsync(id);
+            if (store == null) return NotFound();
+
+            _context.Stores.Remove(store);
+            await _context.SaveChangesAsync();
+
+            return NoContent();
+        }
+
+        // 5. نقطة فحص الـ Scraper (الميزة الذكية)
+        [HttpPost("test-scraper")]
+        public async Task<IActionResult> TestScraper([FromBody] TestScraperRequestDto request)
+        {
+            try
+            {
+                var web = new HtmlWeb();
+                var document = await web.LoadFromWebAsync(request.TestUrl);
+                var productCards = document.DocumentNode.SelectNodes(request.CardXPath);
+
+                if (productCards == null || productCards.Count == 0)
+                {
+                    return Ok(new { status = "error", message = "Scraper test failed — check Card XPath selectors." });
+                }
+
+                var firstCard = productCards.FirstOrDefault();
+                var nameNode = firstCard?.SelectSingleNode(request.NameXPath);
+                var priceNode = firstCard?.SelectSingleNode(request.PriceXPath);
+
+                if (nameNode == null || priceNode == null)
+                {
+                    return Ok(new { status = "error", message = $"Cards found, but Name or Price XPath is wrong." });
+                }
+
+                return Ok(new { status = "success", message = $"Scraper test passed — {productCards.Count} products found." });
+            }
+            catch (Exception ex)
+            {
+                return Ok(new { status = "error", message = $"Error connecting to URL: {ex.Message}" });
+            }
+        }
+    }
+}

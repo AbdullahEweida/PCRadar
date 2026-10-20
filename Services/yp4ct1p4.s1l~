@@ -1,0 +1,123 @@
+﻿using HtmlAgilityPack;
+
+namespace PCRadar.Services
+{
+    public class PriceScraperService : IPriceScraperService
+    {
+        public async Task<List<ScrapedProduct>> ScrapeCategoryAsync(string categoryUrl, string cardXPath, string nameXPath, string priceXPath, string linkXPath, string availabilityXPath)
+        {
+            var allScrapedProducts = new List<ScrapedProduct>();
+            var web = new HtmlWeb();
+
+            int pageNumber = 1;
+            bool hasMoreProducts = true;
+
+            // اللوب هيفضل شغال طول ما في منتجات بتطلع من الصفحة
+            while (hasMoreProducts && pageNumber <= 20)
+            {
+                try
+                {
+                    // تظبيط اللينك عشان يقبل رقم الصفحة سواء كان فيه علامة استفهام أو لأ
+                    string separator = categoryUrl.Contains("?") ? "&" : "?";
+                    string pagedUrl = $"{categoryUrl}{separator}page={pageNumber}";
+
+                    Console.WriteLine($"[Scraper] Scraping page {pageNumber}: {pagedUrl}");
+
+                    var document = await web.LoadFromWebAsync(pagedUrl);
+                    var productCards = document.DocumentNode.SelectNodes(cardXPath);
+
+                    // لو مسار الكارت مرجعش حاجة، يبقى إحنا وصلنا لصفحة فاضية والقسم خلص
+                    if (productCards == null || productCards.Count == 0)
+                    {
+                        hasMoreProducts = false;
+                        break;
+                    }
+
+                    foreach (var card in productCards)
+                    {
+                        try
+                        {
+                            var nameNode = card.SelectSingleNode(nameXPath);
+                            var priceNode = card.SelectSingleNode(priceXPath);
+                            var linkNode = card.SelectSingleNode(linkXPath);
+                            var availabilityNode = card.SelectSingleNode(availabilityXPath); // ضفنا سحب الـ Node هنا
+
+                            if (nameNode != null && priceNode != null && linkNode != null)
+                            {
+                                bool isAvailable = true; // الافتراضي إنه متاح
+
+                                if (availabilityNode != null)
+                                {
+                                    if (availabilityNode.Name == "button")
+                                    {
+                                        // بنشيك على خاصية disabled في الزرار
+                                        var disabledAttr = availabilityNode.GetAttributeValue("disabled", "");
+                                        bool isDisabled = disabledAttr == "disabled" || disabledAttr == "true";
+
+                                        // ممكن كمان نشيك على الكلمة جوه الزرار للضمان
+                                        bool hasOutOfStockText = availabilityNode.InnerText.ToLower().Contains("out of stock");
+
+                                        isAvailable = !isDisabled && !hasOutOfStockText;
+                                    }
+                                    else if (availabilityNode.InnerText.Contains("PC Build Component"))
+                                    {
+                                        // حالة التجميعة فقط
+                                        isAvailable = false;
+                                    }
+                                }
+                                else
+                                {
+                                    // Fallback: لو الـ XPath مجابش حاجة، نرجع للطريقة الشمولية كخطة بديلة
+                                    isAvailable = !card.InnerHtml.ToLower().Contains("out of stock");
+                                }
+
+                                // 2. تنظيف السعر
+                                string rawPrice = priceNode.InnerText.Replace(",", "").Trim();
+                                var match = System.Text.RegularExpressions.Regex.Match(rawPrice, @"\d+(\.\d+)?");
+
+                                if (match.Success && decimal.TryParse(match.Value, out decimal price))
+                                {
+                                    // 3. فلتر الأمان: لو السعر بـ 1 جنيه (Placeholder) نأكد إنه مش متاح
+                                    if (price <= 1)
+                                    {
+                                        isAvailable = false;
+                                    }
+
+                                    string productUrl = linkNode.GetAttributeValue("href", "");
+
+                                    // التأكد إن اللينك كامل، بعض المواقع بترجع لينك نسبي زي /products/item
+                                    if (!productUrl.StartsWith("http"))
+                                    {
+                                        var uri = new Uri(categoryUrl);
+                                        productUrl = $"{uri.Scheme}://{uri.Host}{productUrl}";
+                                    }
+
+                                    allScrapedProducts.Add(new ScrapedProduct
+                                    (
+                                        nameNode.InnerText.Trim(),
+                                        productUrl,
+                                        price,
+                                        isAvailable
+                                    ));
+                                }
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            continue;
+                        }
+                    }
+
+                    pageNumber++; // زود رقم الصفحة وادخل اللفة اللي بعدها
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error on page {pageNumber}: {ex.Message}");
+                    hasMoreProducts = false; // لو الموقع وقع أو قفل الاتصال نوقف اللوب
+                }
+            }
+
+            return allScrapedProducts;
+        }
+    }
+}

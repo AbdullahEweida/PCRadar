@@ -1,0 +1,96 @@
+﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.EntityFrameworkCore;
+using PCRadar.Data;
+using PCRadar.Models;
+using PCRadar.Services;
+
+namespace PCRadar.BackgroundJobs
+{
+    public class PriceMonitorJob : BackgroundService
+    {
+        private readonly IServiceScopeFactory _scopeFactory;
+
+        public PriceMonitorJob(IServiceScopeFactory scopeFactory)
+        {
+            _scopeFactory = scopeFactory;
+        }
+
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                Console.WriteLine($"[PCRadar] Starting price check at {DateTime.UtcNow}...");
+
+                using (var scope = _scopeFactory.CreateScope())
+                {
+                    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                    var scraperService = scope.ServiceProvider.GetRequiredService<IPriceScraperService>();
+
+                    var categoriesToTrack = await dbContext.TrackedCategories
+                                                .Include(c => c.Store)
+                                                .ToListAsync(stoppingToken);
+
+                    foreach (var category in categoriesToTrack)
+                    {
+                        var scrapedItems = await scraperService.ScrapeCategoryAsync(
+                            category.CategoryUrl,
+                            category.Store.CardXPath,
+                            category.Store.NameXPath,
+                            category.Store.PriceXPath,
+                            category.Store.LinkXPath,
+                            category.Store.AvailabilityXPath);
+
+                        foreach (var item in scrapedItems)
+                        {
+                            var existingProductStore = await dbContext.ProductStores
+                                .FirstOrDefaultAsync(ps => ps.ScrapeUrl == item.ProductUrl, stoppingToken);
+
+                            if (existingProductStore != null)
+                            {
+                                dbContext.PriceHistories.Add(new PriceHistory
+                                {
+                                    ProductStoreID = existingProductStore.ID,
+                                    Price = item.Price,
+                                    IsAvailable = true,
+                                    Date = DateTime.UtcNow
+                                });
+                            }
+                            else
+                            {
+                                var newProduct = new Product
+                                {
+                                    Name = item.Name,
+                                    Category = category.Category
+                                };
+                                dbContext.Products.Add(newProduct);
+
+                                var newProductStore = new ProductStore
+                                {
+                                    Product = newProduct,
+                                    StoreID = category.StoreID,
+                                    ScrapeUrl = item.ProductUrl
+                                };
+                                dbContext.ProductStores.Add(newProductStore);
+
+                                dbContext.PriceHistories.Add(new PriceHistory
+                                {
+                                    ProductStore = newProductStore,
+                                    Price = item.Price,
+                                    IsAvailable = true,
+                                    Date = DateTime.UtcNow
+                                });
+                            }
+                        }
+                    }
+
+                    await dbContext.SaveChangesAsync(stoppingToken);
+                }
+
+                Console.WriteLine("[PCRadar] Price check finished. Sleeping for 12 hours.");
+
+                await Task.Delay(TimeSpan.FromHours(12), stoppingToken);
+            }
+        }
+    }
+}
